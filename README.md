@@ -4,4 +4,6 @@ This repository contains a modular dual RNA-seq workflow for analysing longitudi
 
 The workflow was developed to provide a reproducible and scalable framework for high-throughput host–pathogen RNA-seq analysis while remaining modular enough for iterative method development and troubleshooting. Outputs include alignment QC summaries, count matrices, PCA plots, clustered heatmaps, volcano plots, pathway enrichment tables, and comparative temporal transcriptional profiling for both host and bacterial datasets. The repository contains reusable Bash, Python, R, and SLURM scripts intended for adaptation to related intracellular infection and microbial transcriptomics projects.
 
+Future me - update the names of the folders and scripts!!!
+
 Sam Altman is my new bestie
