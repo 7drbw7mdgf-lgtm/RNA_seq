@@ -1,4 +1,0 @@
-sample,r1,r2
-15m_1_Run_1_S4,/path/to/15m_1_Run_1_S4_R1_001.fastq.gz,/path/to/15m_1_Run_1_S4_R2_001.fastq.gz
-15m_1_Run_2_S28,/path/to/15m_1_Run_2_S28_R1_001.fastq.gz,/path/to/15m_1_Run_2_S28_R2_001.fastq.gz
-B1_H1_Run_1_S3,/path/to/B1_H1_Run_1_S3_R1_001.fastq.gz,/path/to/B1_H1_Run_1_S3_R2_001.fastq.gz
