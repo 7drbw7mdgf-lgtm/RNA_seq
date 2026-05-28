@@ -1,0 +1,16 @@
+Analysis/Alignment/Alligment_QC
+Analysis/Alignment/align_dual_rnaseq.sbatch
+Analysis/Alignment/bam_qc.sbatch
+Analysis/Alignment/dual_rnaseq_workflow.sbatch
+Analysis/Alignment/dual_rnaseq_workflow.sh
+Analysis/Alignment/post_alignment_analysis.sbatch
+Analysis/Alignment/post_alignment_analysis.sh
+Analysis/Alignment/submit_dual_rnaseq_slurm.sh
+Analysis/fastqc_results/install_qc_dependencies.sh
+Analysis/fastqc_results/install_visualisation.sh
+Analysis/install_allignment_dependancies.sh
+Analysis/install_graphviz.sh
+Analysis/install_mamba.sh
+Analysis/trim_results/install_fastp.sh
+Analysis/trim_results/run_multiqc_trimmed.sh
+Analysis/trim_results/trim_fastp.sh
