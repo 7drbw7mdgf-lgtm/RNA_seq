@@ -55,20 +55,21 @@ This document shows the full pipeline in execution order, the script used at eac
 
 ---
 
-## Phase 5 — Alignment (Slurm)
+## Phase 5 — Alignment
+
+Each sample was sequenced across two flow-cell lanes (L001 and L007). Both lane files were aligned independently; the per-lane BAMs are merged in Phase 8.
 
 | Step | Status | Script | Key Input Files / Dependencies | Evidence |
 |------|--------|--------|-------------------------------|----------|
-| 5.1 | ✅ Executed | `Analysis/Alignment/submit_dual_rnaseq_slurm.sh` | Activates `dualrnaseq` conda env; submits `dual_rnaseq_workflow.sh` as Slurm job | Multiple `Analysis/Alignment/logs/dual_rnaseq_slurm_XXXXXXXX.log` files (jobs 5628812–5628918+) |
-| 5.2 | ✅ Executed | `Analysis/Alignment/dual_rnaseq_workflow.sh --step align` | Trimmed FASTQ pairs from `Analysis/trim_results/`; host + bacteria STAR indexes | Workflow log shows alignment of 96 samples across timepoints (0h–24h), completing 2026-05-13 |
-| 5.3 | ❌ Dead end | `Analysis/Alignment/align_dual_rnaseq.sbatch` | Would run STAR alignment as a Slurm array job | No `logs/align_ARRAYID_TASKID.*` output files found — array job was never submitted; `submit_dual_rnaseq_slurm.sh` was used instead |
-| 5.4 | ❌ Dead end | `Analysis/Alignment/dual_rnaseq_workflow.sbatch` | Slurm wrapper around `dual_rnaseq_workflow.sh` | No matching Slurm output logs found — script was backed up but `submit_dual_rnaseq_slurm.sh` handled submission |
-| 5.5 | 🗂 Backup copy | `Analysis/Alignment/Bash_scripts/dual_rnaseq_workflow.sh` | Same as `Alignment/dual_rnaseq_workflow.sh` | `diff` confirms files are identical — directory is a backup, not an alternative version |
-| 5.6 | 🗂 Backup copy | `Analysis/Alignment/Slurm_scripts/*.sbatch` | Same as `Alignment/*.sbatch` files | All five sbatch files confirmed identical to current copies |
+| 5.1 | ✅ Executed | `Analysis/Alignment/submit_dual_rnaseq_slurm.sh` | Activates `dualrnaseq` conda env; launches `dual_rnaseq_workflow.sh` | Multiple `Analysis/Alignment/logs/dual_rnaseq_slurm_XXXXXXXX.log` files (jobs 5628812–5628918+) |
+| 5.2 | ✅ Executed | `Analysis/Alignment/dual_rnaseq_workflow.sh --step align` | Trimmed FASTQ pairs from `Analysis/trim_results/`; host + bacteria STAR indexes | Workflow log shows alignment of 96 files across timepoints (0h–24h), completing 2026-05-13 |
+| 5.3 | 🗂 Backup copy | `Analysis/Alignment/Bash_scripts/dual_rnaseq_workflow.sh` | Same as `Alignment/dual_rnaseq_workflow.sh` | `diff` confirms files are identical — directory is a backup, not an alternative version |
 
 ---
 
 ## Phase 6 — Read Counting (featureCounts)
+
+featureCounts was run on the unmerged per-lane BAMs directly (all L001 and L007 files together).
 
 | Step | Status | Script | Key Input Files / Dependencies | Evidence |
 |------|--------|--------|-------------------------------|----------|
@@ -84,21 +85,19 @@ This document shows the full pipeline in execution order, the script used at eac
 | 7.1 | ✅ Executed | `Analysis/Alignment/post_alignment_analysis.sh` | `sample_names.txt`; calls `dual_rnaseq_workflow.sh --step counts` and `Aligment_QC` | `post_alignment_analysis/resume_history.log` shows repeated runs; 96/96 samples complete by 2026-05-13 21:23 |
 | 7.2 | ✅ Executed | `Analysis/Alignment/Aligment_QC` | Sorted BAMs in `bam/host/` + `bam/bacteria/`; GTF/GFF3 annotations; runs samtools, qualimap, RSeQC | `resume_history.log`: "alignment_QC complete" at 2026-05-12 20:00 |
 | 7.3 | ✅ Executed | `Analysis/Alignment/run_multiqc_alignment.sh` | STAR log files in `Alignment/logs/`; outputs to `Alignment/multiqc/` | `Alignment/multiqc/alignment_multiqc_report.html` exists |
-| 7.4 | ❌ Dead end | `Analysis/Alignment/bam_qc.sbatch` | Slurm wrapper for BAM QC | No `bam_qc_*` Slurm output logs found — QC ran through `post_alignment_analysis.sh` directly |
-| 7.5 | ❌ Dead end | `Analysis/Alignment/post_alignment_analysis.sbatch` | Slurm wrapper for `post_alignment_analysis.sh` | No matching Slurm output logs found — script ran interactively |
-| 7.6 | ❌ Dead end | `Analysis/Alignment/run_multiqc_alignment.sbatch` | Slurm wrapper for `run_multiqc_alignment.sh` | No matching Slurm output logs found |
 
 ---
 
-## Phase 8 — Anton Downstream Mapping (Parallel Sense-Check)
+## Phase 8 — Lane Merge & Sense-Check (Anton Track)
 
-*A separate earlier analysis track using pre-existing BAMs from a different alignment run.*
+A parallel validation track that took the main alignment BAMs, merged their two lanes per sample+run using `samtools merge`, then ran an independent featureCounts + DESeq2 sense-check.
 
 | Step | Status | Script | Key Input Files / Dependencies | Evidence |
 |------|--------|--------|-------------------------------|----------|
-| 8.1 | ✅ Executed | `Analysis/Anton_downstream_mapping/FeatureCounts/run_featurecounts_host.sbatch` | Host BAM files from Anton's alignment; outputs `FeatureCounts_host/` | `FeatureCounts_host/` directory has count outputs |
-| 8.2 | ✅ Executed | `Analysis/Anton_downstream_mapping/Sense_check_host/sense_check_host.sbatch` | Anton featureCounts output; `deseq2_sense_check_host.R` | `logs/sense_check_5927798.log` — timestamped, node c16 |
-| 8.3 | ✅ Executed | `Analysis/Anton_downstream_mapping/Sense_check_host/deseq2_sense_check_host.R` | Count matrix; sample metadata TSV | `logs/deseq2_sense_check_host.log` exists with results |
+| 8.1 | ✅ Executed | `Analysis/Anton_downstream_mapping/Bam_indexing/Host/index_host_bams.sh` | Per-lane BAMs from `Analysis/Alignment/bam/host/`; merges L001 + L007 per sample+run using `samtools merge` | Merged BAMs present in `Bam_indexing/Host/merged/`; per-sample logs in `Host/logs/`; job log `merge_lanes_host_5926828.log` — 2026-05-14 |
+| 8.2 | ✅ Executed | `Analysis/Anton_downstream_mapping/Bam_indexing/Bacteria/index_bacteria_bams.sh` | Per-lane BAMs from `Analysis/Alignment/bam/bacteria/`; same lane-merge logic | Merged BAMs present in `Bam_indexing/Bacteria/merged/` |
+| 8.3 | ✅ Executed | `Analysis/Anton_downstream_mapping/FeatureCounts/run_featurecounts_host.sbatch` | Merged host BAMs from step 8.1; outputs `FeatureCounts_host/` | `FeatureCounts_host/` directory has count outputs |
+| 8.4 | ✅ Executed | `Analysis/Anton_downstream_mapping/Sense_check_host/deseq2_sense_check_host.R` | Merged-BAM count matrix; sample metadata TSV | `logs/deseq2_sense_check_host.log` exists with results |
 
 ---
 
@@ -106,21 +105,17 @@ This document shows the full pipeline in execution order, the script used at eac
 
 | Step | Status | Script | Key Input Files / Dependencies | Evidence |
 |------|--------|--------|-------------------------------|----------|
-| 9.1 | ✅ Executed | `Analysis/DifferentialExpression/slurm/master_workflow.sbatch` | Calls `run_full_workflow.sh`; activated `dualrnaseq` env | `DifferentialExpression/logs/master_5923999.out` — ran to completion |
-| 9.2 | ✅ Executed | `Analysis/DifferentialExpression/scripts/run_full_workflow.sh` | `config.env`; orchestrates scripts 00–06 | Progress log shows 0%–100% on 2026-05-14 |
-| 9.3 | ✅ Executed | `Analysis/DifferentialExpression/scripts/00_install_dependencies.sh` | R/Bioconductor packages; DESeq2, DESeq2, igraph, etc. | `DifferentialExpression/logs/dependencies.log` |
-| 9.4 | ✅ Executed | `Analysis/DifferentialExpression/scripts/01_validate_repair_inputs.R` | `featureCounts_host.txt`, `featureCounts_bacteria.txt`, sample metadata | Progress log: "20%: validation complete; samples=192 timepoints=0h,15m,30m,60m,3h,24h" |
-| 9.5 | ✅ Executed | `Analysis/DifferentialExpression/scripts/02_deseq2_all_comparisons.R` | Validated count matrices; sample design | Progress log: "45%: DESeq2 complete host comparisons=30" |
-| 9.6 | ✅ Executed | `Analysis/DifferentialExpression/scripts/03_publication_figures.R` | DESeq2 results; normalised counts | Progress log: "65%: plotting complete host/pathogen" |
-| 9.7 | ✅ Executed | `Analysis/DifferentialExpression/scripts/04_pathway_enrichment.R` | DESeq2 results; KEGG pathway annotations | Progress log: "80%: enrichment/pathway complete host + pathogen" |
-| 9.8 | ✅ Executed | `Analysis/DifferentialExpression/scripts/05_integrated_networks.R` | Host + bacteria counts; DE results | Progress log: "90%: integrated host-pathogen correlation complete edges=1" |
-| 9.9 | ✅ Executed | `Analysis/DifferentialExpression/scripts/06_reports_manifests.R` | All workflow outputs | Progress log: "100%: workflow reports and manifests complete" |
-| 9.10 | ❌ Dead end | `Analysis/DifferentialExpression/scripts/submit_workflow.sh` | Slurm submission wrapper | Individual sbatch submitted directly; no log evidence this wrapper ran |
-| 9.11 | ❌ Dead end | `Analysis/DifferentialExpression/slurm/deseq2.sbatch` | Standalone DESeq2 Slurm job | Only `master_workflow.sbatch` was used — no separate deseq2 job output found |
-| 9.12 | ❌ Dead end | `Analysis/DifferentialExpression/slurm/validation.sbatch` | Standalone validation Slurm job | Same — ran inside master workflow, not submitted separately |
-| 9.13 | ❌ Dead end | `Analysis/DifferentialExpression/Snakefile` + `main.nf` | Snakemake / Nextflow alternative workflow definitions | Pipeline ran via bash scripts — no evidence snakemake or nextflow was invoked |
-| 9.14 | ❌ Dead end | `Analysis/setup_enterprise_differential_expression_workflow.sh` | Sets up the DifferentialExpression directory structure | Directory was already set up by this or a prior run; no log evidence of a named invocation |
-| 9.15 | ❌ Dead end | `Analysis/post_trim_to_deseq2_workflow.sh` + `.sbatch` | End-to-end post-trim orchestrator | `run_complete_dual_rnaseq_pipeline.sh` only ran as `--dry-run`; DE was driven by `run_full_workflow.sh` instead |
+| 9.1 | ✅ Executed | `Analysis/DifferentialExpression/scripts/run_full_workflow.sh` | `config.env`; orchestrates scripts 00–06 | Progress log shows 0%–100% on 2026-05-14 |
+| 9.2 | ✅ Executed | `Analysis/DifferentialExpression/scripts/00_install_dependencies.sh` | R/Bioconductor packages; DESeq2, igraph, etc. | `DifferentialExpression/logs/dependencies.log` |
+| 9.3 | ✅ Executed | `Analysis/DifferentialExpression/scripts/01_validate_repair_inputs.R` | `featureCounts_host.txt`, `featureCounts_bacteria.txt`, sample metadata | Progress log: "20%: validation complete; samples=192 timepoints=0h,15m,30m,60m,3h,24h" |
+| 9.4 | ✅ Executed | `Analysis/DifferentialExpression/scripts/02_deseq2_all_comparisons.R` | Validated count matrices; sample design | Progress log: "45%: DESeq2 complete host comparisons=30" |
+| 9.5 | ✅ Executed | `Analysis/DifferentialExpression/scripts/03_publication_figures.R` | DESeq2 results; normalised counts | Progress log: "65%: plotting complete host/pathogen" |
+| 9.6 | ✅ Executed | `Analysis/DifferentialExpression/scripts/04_pathway_enrichment.R` | DESeq2 results; KEGG pathway annotations | Progress log: "80%: enrichment/pathway complete host + pathogen" |
+| 9.7 | ✅ Executed | `Analysis/DifferentialExpression/scripts/05_integrated_networks.R` | Host + bacteria counts; DE results | Progress log: "90%: integrated host-pathogen correlation complete edges=1" |
+| 9.8 | ✅ Executed | `Analysis/DifferentialExpression/scripts/06_reports_manifests.R` | All workflow outputs | Progress log: "100%: workflow reports and manifests complete" |
+| 9.9 | ❌ Dead end | `Analysis/DifferentialExpression/Snakefile` + `main.nf` | Snakemake / Nextflow alternative workflow definitions | Pipeline ran via bash scripts — no evidence snakemake or nextflow was invoked |
+| 9.10 | ❌ Dead end | `Analysis/setup_enterprise_differential_expression_workflow.sh` | Sets up the DifferentialExpression directory structure | Directory was already set up; no log evidence of a named invocation |
+| 9.11 | ❌ Dead end | `Analysis/post_trim_to_deseq2_workflow.sh` | End-to-end post-trim orchestrator | Only ran as `--dry-run`; DE was driven by `run_full_workflow.sh` instead |
 
 ---
 
@@ -131,8 +126,8 @@ This document shows the full pipeline in execution order, the script used at eac
 | Env setup | `install_mamba.sh`, `install_allignment_dependancies.sh`, `install_qc_dependencies.sh`, `install_fastp.sh`, `install_visualisation.sh` | `install_graphviz.sh`, `install_deseq2_dependencies.sh` |
 | Raw QC | `QC.sh` (project root), MultiQC | — |
 | Trimming | `trim_fastp.sh`, `run_multiqc_trimmed.sh` | — |
-| Alignment | `submit_dual_rnaseq_slurm.sh`, `dual_rnaseq_workflow.sh` | `align_dual_rnaseq.sbatch`, `dual_rnaseq_workflow.sbatch` |
-| Post-alignment QC | `post_alignment_analysis.sh`, `Aligment_QC`, `run_multiqc_alignment.sh` | `bam_qc.sbatch`, `post_alignment_analysis.sbatch`, `run_multiqc_alignment.sbatch` |
-| Sense check | `sense_check_host.sbatch`, `deseq2_sense_check_host.R`, `run_featurecounts_host.sbatch` | — |
-| DE analysis | `master_workflow.sbatch`, `run_full_workflow.sh`, `00_install_dependencies.sh` through `06_reports_manifests.R` | `submit_workflow.sh`, individual stage sbatch files, `Snakefile`, `main.nf` |
-| Backup copies | — (never executed) | All files in `Alignment/Bash_scripts/` and `Alignment/Slurm_scripts/` |
+| Alignment | `submit_dual_rnaseq_slurm.sh`, `dual_rnaseq_workflow.sh` | — |
+| Post-alignment QC | `post_alignment_analysis.sh`, `Aligment_QC`, `run_multiqc_alignment.sh` | — |
+| Lane merge & sense check | `index_host_bams.sh`, `index_bacteria_bams.sh`, `run_featurecounts_host.sbatch`, `deseq2_sense_check_host.R` | — |
+| DE analysis | `run_full_workflow.sh`, `00_install_dependencies.sh` through `06_reports_manifests.R` | `Snakefile`, `main.nf`, `post_trim_to_deseq2_workflow.sh` |
+| Backup copies | — (never executed) | All files in `Alignment/Bash_scripts/` |
