@@ -29,27 +29,24 @@ Campylobacter jejuni NCTC 11168 infection of human macrophages (project SOUK0112
 
 ## Step 1 — Raw read QC
 
-**Script:** `01_trimming/run_pretrim_fastqc.sh`  
-**QC report:** `01_trimming/qc/pre_trim_multiqc_report.html`
-
-Run from the project root directory. FastQC is run on all raw `*_R1_*.fastq.gz` and `*_R2_*.fastq.gz` files, then MultiQC aggregates the results into a single report.
+FastQC is run on all raw `*_R1_001.fastq.gz` and `*_R2_001.fastq.gz` files, then MultiQC aggregates the results.
 
 ```bash
-cd /home/lshpk18/OzanGundogdu_SOUK011275
-bash 01_trimming/run_pretrim_fastqc.sh
+fastqc -t 8 -o Analysis/fastqc_results /home/lshpk18/OzanGundogdu_SOUK011275/*_R1_001.fastq.gz \
+                                        /home/lshpk18/OzanGundogdu_SOUK011275/*_R2_001.fastq.gz
+multiqc Analysis/fastqc_results -o Analysis/fastqc_results
 ```
 
 Output goes to `Analysis/fastqc_results/`.
-
-> A sequencing facility QC report is also available at `01_trimming/qc/source_genomics_qc_report.html`.
 
 ---
 
 ## Step 2 — Adapter trimming and quality filtering
 
-**Script:** `01_trimming/trim_fastp.sh`
+**Script:** `Analysis/trim_results/trim_fastp.sh`  
+**Conda environment:** `rna-seq`
 
-Processes all paired-end samples in `FASTQ_DIR`. Key parameters:
+Processes all paired-end `*_R1_001.fastq.gz` files found in `FASTQ_DIR` (defaults to the project root). Key parameters:
 
 | Parameter | Value | Purpose |
 |---|---|---|
@@ -62,24 +59,23 @@ Processes all paired-end samples in `FASTQ_DIR`. Key parameters:
 | `--thread` | 4 | Threads per sample |
 
 ```bash
-bash 01_trimming/trim_fastp.sh
+bash Analysis/trim_results/trim_fastp.sh
+# or with a custom FASTQ source directory:
+FASTQ_DIR=/path/to/raw_fastqs bash Analysis/trim_results/trim_fastp.sh
 ```
 
-Output: `*_R1_trimmed.fastq.gz`, `*_R2_trimmed.fastq.gz`, and per-sample fastp HTML/JSON reports written alongside the script.
-
-Note: downstream alignment and counting scripts expect trimmed FASTQs to be located in `Analysis/trim_results/` (the pipeline `TRIM_DIR`). If you run a different copy of `trim_fastp.sh`, set `FASTQ_DIR`/`TRIM_DIR` accordingly or run the script from the `Analysis/trim_results` location so downstream steps find the trimmed files.
+Output: `*_R1_trimmed.fastq.gz`, `*_R2_trimmed.fastq.gz`, and per-sample fastp HTML/JSON reports, all written to `Analysis/trim_results/`.
 
 ---
 
 ## Step 3 — Post-trim QC
 
-**Script:** `01_trimming/run_multiqc_trimmed.sh`  
-**QC report:** `01_trimming/qc/post_trim_multiqc_report.html`
+**QC report:** `Analysis/trimmed_fastqc_results/multiqc_report.html`
 
-Runs MultiQC over the trimmed FastQC results directory to confirm trimming quality.
+Runs MultiQC over the fastp HTML/JSON reports in `Analysis/trim_results/` to confirm trimming quality.
 
 ```bash
-bash 01_trimming/run_multiqc_trimmed.sh
+multiqc Analysis/trim_results -o Analysis/trimmed_fastqc_results
 ```
 
 Output goes to `Analysis/trimmed_fastqc_results/`.
