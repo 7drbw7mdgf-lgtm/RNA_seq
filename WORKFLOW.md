@@ -67,6 +67,8 @@ bash 01_trimming/trim_fastp.sh
 
 Output: `*_R1_trimmed.fastq.gz`, `*_R2_trimmed.fastq.gz`, and per-sample fastp HTML/JSON reports written alongside the script.
 
+Note: downstream alignment and counting scripts expect trimmed FASTQs to be located in `Analysis/trim_results/` (the pipeline `TRIM_DIR`). If you run a different copy of `trim_fastp.sh`, set `FASTQ_DIR`/`TRIM_DIR` accordingly or run the script from the `Analysis/trim_results` location so downstream steps find the trimmed files.
+
 ---
 
 ## Step 3 — Post-trim QC
@@ -115,7 +117,7 @@ Index locations (from `pipeline_config.sh`):
 
 **Script:** `02_alignment/Star-mapping.sh`
 
-Aligns every sample in `Analysis/trim_results/` to both genomes in sequence. Skips samples already aligned (unless `--force` is passed). Runs `samtools flagstat` and `samtools idxstats` immediately after each alignment.
+Aligns every sample in `Analysis/trim_results/` to the host genome first, then to the bacterial genome (STAR is run twice per sample). Skips samples already aligned (unless `--force` is passed). Runs `samtools flagstat` and `samtools idxstats` immediately after each alignment.
 
 ```bash
 bash 02_alignment/Star-mapping.sh --step align
@@ -235,7 +237,7 @@ Key featureCounts flags:
 |---|---|
 | `-p -B` | Paired-end, both mates must map |
 | `-C` | Do not count chimeric fragments |
-| `-F GTF -t gene -g ID` | GFF3 input, count at gene level |
+| `-F GFF -t gene -g ID` | GFF3 input, count at gene level |
 | `-T` | 16 threads |
 
 Output: `Analysis/Anton_downstream_mapping/FeatureCounts/featureCounts_bacteria.txt`
