@@ -3,7 +3,7 @@
 Campylobacter jejuni NCTC 11168 infection of human macrophages (project SOUK011275).  
 48 infected samples + 4 uninfected controls, sequenced across 2 runs × 2 lanes (L001, L007), paired-end 150 bp.
 
-**Conda environment:** `dualrnaseq`  
+**Conda environment:** `dualrnaseq` (alignment/trimming steps); `dualrnaseq_pathway` (R filtering and downstream steps)  
 **Working directory:** `/home/lshpk18/OzanGundogdu_SOUK011275`
 
 ---
@@ -265,6 +265,58 @@ Output: `Analysis/Anton_downstream_mapping/FeatureCounts/FeatureCounts_host/feat
 
 ---
 
+## Step 11 — Count matrix filtering
+
+**Scripts:** `Analysis/filtering/filter_bacteria.R`, `Analysis/filtering/filter_host.R`  
+**Wrapper:** `Analysis/filtering/run_filtering.sh`  
+**Conda environment:** `dualrnaseq_pathway`
+
+Cleans the raw featureCounts output into analysis-ready count matrices: strips featureCounts metadata columns, sanitises sample names, collapses technical replicates (bacteria only), applies a low-count filter, and writes QC figures.
+
+```bash
+bash Analysis/filtering/run_filtering.sh          # both organisms
+bash Analysis/filtering/run_filtering.sh bacteria # bacteria only
+bash Analysis/filtering/run_filtering.sh host     # host only
+MIN_TOTAL_COUNT=20 bash Analysis/filtering/run_filtering.sh  # custom threshold
+```
+
+### Bacteria (`filter_bacteria.R`)
+
+| Step | Detail |
+|---|---|
+| Column cleaning | Strips full BAM path and `.bacteria.merged.bam` suffix |
+| Run collapse | Sums Run_1 + Run_2 counts per biological sample → 24 columns (4 replicates × 6 timepoints) |
+| Low-count filter | Removes genes where `rowSums < 10` across all 24 samples |
+| Result | 1,603 / 1,668 genes retained (96.1%) |
+
+Timepoint mapping: `B1_H1 … B4_H4` → `0h`; `1h_*` → `60m`; all others use the prefix as-is.
+
+Output: `Analysis/filtering/bacteria/`
+- `bacteria_filtered_counts.tsv` — 1,603 genes × 24 samples
+- `bacteria_metadata.tsv` — sample_id, timepoint, replicate
+- `bacteria_filter_stats.tsv` — counts at each filtering step
+- `figures/bacteria_library_sizes.{pdf,png}`
+- `figures/bacteria_count_distribution.{pdf,png}`
+
+### Host (`filter_host.R`)
+
+| Step | Detail |
+|---|---|
+| Column cleaning | Strips full BAM path and `.host.merged.bam` suffix |
+| Run handling | Keeps all 48 columns (Run_1 and Run_2 kept separate; run is a batch covariate in DESeq2) |
+| Low-count filter | Removes genes where `rowSums < 10` across all 48 samples |
+| Result | 33,824 / 50,116 genes retained (67.5%) |
+
+Output: `Analysis/filtering/host/`
+- `host_filtered_counts.tsv` — 33,824 genes × 48 samples
+- `host_metadata.tsv` — sample_id, timepoint, run, replicate
+- `host_filter_stats.tsv` — counts at each filtering step
+- `figures/host_library_sizes.{pdf,png}`
+- `figures/host_count_distribution.{pdf,png}`
+- `figures/host_library_by_run.{pdf,png}`
+
+---
+
 ## Workflow summary
 
 ```
@@ -294,4 +346,8 @@ index_host_bams.sh               (merge L001+L007 → 96 host merged BAMs)
     ▼
 run_featurecounts_bacteria.sh    → featureCounts_bacteria.txt
 run_featurecounts_host.sh        → featureCounts_host.txt
+    │
+    ▼
+filter_bacteria.R                (collapse runs, low-count filter → 1,603 genes × 24 samples)
+filter_host.R                    (low-count filter → 33,824 genes × 48 samples)
 ```
