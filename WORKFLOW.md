@@ -314,6 +314,61 @@ Output: `Analysis/filtering/host/`
 
 ---
 
+## Step 12 — Normalisation
+
+**Scripts:** `Analysis/normalisation/normalise_bacteria.R`, `Analysis/normalisation/normalise_host.R`  
+**Wrapper:** `Analysis/normalisation/run_normalisation.sh`  
+**Conda environment:** `dualrnaseq_pathway`
+
+Reads the filtered count matrices from Step 11 and produces DESeq2 size-factor-normalised counts and a variance-stabilising transformation (VST) for both organisms.
+
+```bash
+bash Analysis/normalisation/run_normalisation.sh          # both organisms
+bash Analysis/normalisation/run_normalisation.sh bacteria # bacteria only
+bash Analysis/normalisation/run_normalisation.sh host     # host only
+```
+
+**Design:** `~ run + timepoint` for both organisms (run modelled as a batch covariate).
+
+### Bacteria (`normalise_bacteria.R`)
+
+Size factors are estimated using `poscounts` (more robust than the standard median-of-ratios when many genes have zeros, which is typical for bacterial RNA-seq). VST falls back to `varianceStabilizingTransformation` if the fast approximation fails.
+
+| Output | Description |
+|---|---|
+| `bacteria_size_factors.tsv` | Per-sample size factors with metadata |
+| `bacteria_normalised_counts.tsv` | Raw counts ÷ size factors (1,603 genes × 48 samples) |
+| `bacteria_vst.tsv` | VST-transformed matrix for visualisation/clustering |
+| `bacteria_dds.rds` / `bacteria_vst.rds` | DESeq2 objects for downstream use |
+| `figures/bacteria_size_factors.{pdf,png}` | Size factor bar chart |
+| `figures/bacteria_normalised_boxplot.{pdf,png}` | log2 normalised counts per sample |
+| `figures/bacteria_PCA.{pdf,png}` | PCA on VST, coloured by timepoint |
+| `figures/bacteria_sample_distances.pdf` | Sample distance heatmap (VST) |
+| `figures/bacteria_top50_variable_genes.pdf` | Top 50 variable genes heatmap |
+
+Size factor range: 0.084 – 15.526 (wide range reflects the large variance in bacterial read depth across timepoints).
+
+### Host (`normalise_host.R`)
+
+Standard median-of-ratios size factor estimation.
+
+| Output | Description |
+|---|---|
+| `host_size_factors.tsv` | Per-sample size factors with metadata |
+| `host_normalised_counts.tsv` | Raw counts ÷ size factors (33,824 genes × 48 samples) |
+| `host_vst.tsv` | VST-transformed matrix for visualisation/clustering |
+| `host_dds.rds` / `host_vst.rds` | DESeq2 objects for downstream use |
+| `figures/host_size_factors.{pdf,png}` | Size factor bar chart |
+| `figures/host_normalised_boxplot.{pdf,png}` | log2 normalised counts per sample |
+| `figures/host_PCA_by_timepoint.{pdf,png}` | PCA on VST, coloured by timepoint |
+| `figures/host_PCA_by_run.{pdf,png}` | PCA on VST, coloured by run (batch check) |
+| `figures/host_sample_distances.pdf` | Sample distance heatmap (VST) |
+| `figures/host_top50_variable_genes.pdf` | Top 50 variable genes heatmap |
+
+Size factor range: 0.772 – 1.543 (tight range, indicating consistent library sizes across host samples).
+
+---
+
 ## Workflow summary
 
 ```
@@ -347,4 +402,8 @@ run_featurecounts_host.sh        → featureCounts_host.txt
     ▼
 filter_bacteria.R                (low-count filter → 1,603 genes × 48 samples)
 filter_host.R                    (low-count filter → 33,824 genes × 48 samples)
+    │
+    ▼
+normalise_bacteria.R             (poscounts size factors + VST → normalised counts)
+normalise_host.R                 (median-of-ratios size factors + VST → normalised counts)
 ```
