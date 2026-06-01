@@ -285,18 +285,19 @@ MIN_TOTAL_COUNT=20 bash Analysis/filtering/run_filtering.sh  # custom threshold
 | Step | Detail |
 |---|---|
 | Column cleaning | Strips full BAM path and `.bacteria.merged.bam` suffix |
-| Run collapse | Sums Run_1 + Run_2 counts per biological sample → 24 columns (4 replicates × 6 timepoints) |
-| Low-count filter | Removes genes where `rowSums < 10` across all 24 samples |
+| Run handling | Keeps all 48 columns (Run_1 and Run_2 kept separate → 8 per timepoint: 4 replicates × 2 runs) |
+| Low-count filter | Removes genes where `rowSums < 10` across all 48 samples |
 | Result | 1,603 / 1,668 genes retained (96.1%) |
 
 Timepoint mapping: `B1_H1 … B4_H4` → `0h`; `1h_*` → `60m`; all others use the prefix as-is.
 
 Output: `Analysis/filtering/bacteria/`
-- `bacteria_filtered_counts.tsv` — 1,603 genes × 24 samples
-- `bacteria_metadata.tsv` — sample_id, timepoint, replicate
+- `bacteria_filtered_counts.tsv` — 1,603 genes × 48 samples
+- `bacteria_metadata.tsv` — sample_id, timepoint, run, replicate
 - `bacteria_filter_stats.tsv` — counts at each filtering step
 - `figures/bacteria_library_sizes.{pdf,png}`
 - `figures/bacteria_count_distribution.{pdf,png}`
+- `figures/bacteria_library_by_run.{pdf,png}`
 
 ### Host (`filter_host.R`)
 
@@ -348,6 +349,6 @@ run_featurecounts_bacteria.sh    → featureCounts_bacteria.txt
 run_featurecounts_host.sh        → featureCounts_host.txt
     │
     ▼
-filter_bacteria.R                (collapse runs, low-count filter → 1,603 genes × 24 samples)
+filter_bacteria.R                (low-count filter → 1,603 genes × 48 samples)
 filter_host.R                    (low-count filter → 33,824 genes × 48 samples)
 ```
