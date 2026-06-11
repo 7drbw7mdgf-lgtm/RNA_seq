@@ -1,409 +1,514 @@
-# Dual RNA-Seq Workflow Guide
+# Dual RNA-seq Workflow Guide
 
-Campylobacter jejuni NCTC 11168 infection of human macrophages (project SOUK011275).  
-48 infected samples + 4 uninfected controls, sequenced across 2 runs × 2 lanes (L001, L007), paired-end 150 bp.
+Campylobacter jejuni NCTC 11168 infection of human macrophages, project
+SOUK011275.
 
-**Conda environment:** `dualrnaseq` (alignment/trimming steps); `dualrnaseq_pathway` (R filtering and downstream steps)  
-**Working directory:** `/home/lshpk18/OzanGundogdu_SOUK011275`
+- 48 infected samples plus 4 uninfected controls
+- Two sequencing runs and two lanes per run, paired-end 150 bp
+- Required analysis timepoints: `0h`, `15m`, `30m`, `60m`, `3h`, `24h`
+- Project root: `/home/lshpk18/OzanGundogdu_SOUK011275`
+- Main analysis root: `/home/lshpk18/OzanGundogdu_SOUK011275/Analysis`
+
+Last updated: 2026-06-11
 
 ---
 
-## Tools and reference versions
+## Active entry points
 
-| Tool | Version |
+Run commands from the project root unless a full path is shown.
+
+| Purpose | Command |
 |---|---|
-| FastQC | latest in `dualrnaseq` |
+| Complete pipeline submitter | `bash Analysis/Bash_scripts/submit_complete_dual_rnaseq_pipeline_slurm.sh` |
+| Alignment only, local/resumable | `bash Analysis/Alignment/Bash_scripts/dual_rnaseq_workflow.sh --step all` |
+| Alignment indexes only | `bash Analysis/Alignment/Bash_scripts/dual_rnaseq_workflow.sh --step index` |
+| Alignment for one sample | `bash Analysis/Alignment/Bash_scripts/dual_rnaseq_workflow.sh --step align --sample SAMPLE_ID` |
+| Post-alignment counting/QC bridge | `bash Analysis/Alignment/Bash_scripts/post_alignment_analysis.sh --threads 16 --require-complete` |
+| Differential expression workflow | `bash Analysis/DifferentialExpression/scripts/submit_workflow.sh` |
+| Watch DE progress | `bash Analysis/DifferentialExpression/scripts/monitor_progress.sh` |
+
+Direct SLURM entry point for the current DifferentialExpression workflow:
+
+```bash
+sbatch /home/lshpk18/OzanGundogdu_SOUK011275/Analysis/DifferentialExpression/slurm/master_workflow.sbatch
+```
+
+Progress log:
+
+```bash
+tail -f /home/lshpk18/OzanGundogdu_SOUK011275/Analysis/DifferentialExpression/logs/progress.log
+```
+
+---
+
+## Tools and references
+
+| Tool | Version / source |
+|---|---|
+| FastQC | environment-provided |
 | MultiQC | 1.25.1 |
-| fastp | latest in `dualrnaseq` |
+| fastp | environment-provided |
 | STAR | 2.7.11b |
 | samtools | 1.20 |
-| featureCounts (Subread) | 2.0.6 |
+| featureCounts / Subread | 2.0.6 |
+| DESeq2 and R packages | installed/checked by `DifferentialExpression/scripts/00_install_dependencies.sh` and `00_install_r_packages.R` |
 
 | Reference | Accession | Used for |
 |---|---|---|
-| Human genome + annotation | GCF_000001405.40 (GRCh38.p14) | Host alignment and counting |
-| *C. jejuni* NCTC 11168 genome | AL111168.1 | Bacterial alignment |
-| *C. jejuni* NCTC 11168 annotation | AL111168.1.gff3 | Bacterial counting |
+| Human genome + annotation | GCF_000001405.40, GRCh38.p14 | Host alignment and counting |
+| C. jejuni NCTC 11168 genome | AL111168.1 | Bacterial alignment |
+| C. jejuni NCTC 11168 annotation | AL111168.1.gff3 | Bacterial counting |
+
+Reference files live under:
+
+```text
+Analysis/Alignment/references/
+```
 
 ---
 
-## Step 1 — Raw read QC
+## Directory map
 
-FastQC is run on all raw `*_R1_001.fastq.gz` and `*_R2_001.fastq.gz` files, then MultiQC aggregates the results.
+| Path | Contents |
+|---|---|
+| `Analysis/fastqc_results/` | Raw-read FastQC/MultiQC outputs |
+| `Analysis/trim_results/` | fastp-trimmed FASTQs and fastp reports |
+| `Analysis/trimmed_fastqc_results/` | Post-trim MultiQC output |
+| `Analysis/Alignment/Bash_scripts/` | Alignment, QC, counting, audit, and SLURM helper scripts |
+| `Analysis/Alignment/Slurm_scripts/` | Lower-level SLURM job definitions |
+| `Analysis/Alignment/star_index/` | Host and bacterial STAR indexes |
+| `Analysis/Alignment/alignments/` | STAR logs and unmapped read outputs |
+| `Analysis/Alignment/bam/` | Coordinate-sorted host and bacterial BAM/BAI files |
+| `Analysis/Alignment/qc/` | samtools flagstat/idxstats and related QC |
+| `Analysis/Alignment/counts/` | Host and bacterial featureCounts outputs |
+| `Analysis/Alignment/post_alignment_analysis/` | Completion summaries and metadata bridge outputs |
+| `Analysis/DifferentialExpression/` | Validation, DESeq2, figures, enrichment, integrated networks, reports |
+
+---
+
+## Step 1 - Raw read QC
+
+FastQC is run on all raw paired FASTQ files, then MultiQC aggregates the
+reports.
 
 ```bash
-fastqc -t 8 -o Analysis/fastqc_results /home/lshpk18/OzanGundogdu_SOUK011275/*_R1_001.fastq.gz \
-                                        /home/lshpk18/OzanGundogdu_SOUK011275/*_R2_001.fastq.gz
+fastqc -t 8 -o Analysis/fastqc_results *_R1_001.fastq.gz *_R2_001.fastq.gz
 multiqc Analysis/fastqc_results -o Analysis/fastqc_results
 ```
 
-Output goes to `Analysis/fastqc_results/`.
+Output:
+
+```text
+Analysis/fastqc_results/
+```
 
 ---
 
-## Step 2 — Adapter trimming and quality filtering
+## Step 2 - Adapter trimming and read filtering
 
-**Script:** `Analysis/trim_results/trim_fastp.sh`  
-**Conda environment:** `rna-seq`
+Script:
 
-Processes all paired-end `*_R1_001.fastq.gz` files found in `FASTQ_DIR` (defaults to the project root). Key parameters:
+```text
+Analysis/trim_results/trim_fastp.sh
+```
 
-| Parameter | Value | Purpose |
-|---|---|---|
-| `--detect_adapter_for_pe` | — | Auto-detect adapters for paired-end reads |
-| `--cut_front / --cut_tail` | window 4, quality 20 | Sliding-window quality trimming |
-| `--qualified_quality_phred` | 20 | Minimum per-base quality |
-| `--unqualified_percent_limit` | 40 | Drop reads with >40% low-quality bases |
-| `--n_base_limit` | 5 | Drop reads with >5 N bases |
-| `--length_required` | 30 | Drop reads shorter than 30 bp after trimming |
-| `--thread` | 4 | Threads per sample |
+Typical usage:
 
 ```bash
 bash Analysis/trim_results/trim_fastp.sh
-# or with a custom FASTQ source directory:
 FASTQ_DIR=/path/to/raw_fastqs bash Analysis/trim_results/trim_fastp.sh
 ```
 
-Output: `*_R1_trimmed.fastq.gz`, `*_R2_trimmed.fastq.gz`, and per-sample fastp HTML/JSON reports, all written to `Analysis/trim_results/`.
+Important fastp settings:
+
+| Parameter | Value / purpose |
+|---|---|
+| `--detect_adapter_for_pe` | Auto-detect paired-end adapters |
+| `--cut_front --cut_tail` | Sliding-window quality trimming |
+| `--cut_window_size` | 4 |
+| `--cut_mean_quality` | 20 |
+| `--qualified_quality_phred` | 20 |
+| `--unqualified_percent_limit` | 40 |
+| `--n_base_limit` | 5 |
+| `--length_required` | 30 |
+| `--thread` | 4 per sample |
+
+Output:
+
+```text
+Analysis/trim_results/*_R1_trimmed.fastq.gz
+Analysis/trim_results/*_R2_trimmed.fastq.gz
+Analysis/trim_results/*.html
+Analysis/trim_results/*.json
+```
 
 ---
 
-## Step 3 — Post-trim QC
-
-**QC report:** `Analysis/trimmed_fastqc_results/multiqc_report.html`
-
-Runs MultiQC over the fastp HTML/JSON reports in `Analysis/trim_results/` to confirm trimming quality.
+## Step 3 - Post-trim QC
 
 ```bash
 multiqc Analysis/trim_results -o Analysis/trimmed_fastqc_results
 ```
 
-Output goes to `Analysis/trimmed_fastqc_results/`.
+Output:
+
+```text
+Analysis/trimmed_fastqc_results/multiqc_report.html
+```
 
 ---
 
-## Step 4 — Build STAR genome indexes
+## Step 4 - STAR indexing and alignment
 
-**Script:** `02_alignment/Star-mapping.sh`  
-**Config:** `02_alignment/pipeline_config.sh`
+Main script:
 
-Sources `pipeline_config.sh` for all paths. Builds separate STAR indexes for the host and bacterial genomes. The read overhang is set to 149 (read length 150 − 1).
+```text
+Analysis/Alignment/Bash_scripts/dual_rnaseq_workflow.sh
+```
+
+Configuration:
+
+```text
+Analysis/Alignment/Bash_scripts/pipeline_config.sh
+```
+
+Build host and bacterial STAR indexes:
 
 ```bash
-bash 02_alignment/Star-mapping.sh --step index
+bash Analysis/Alignment/Bash_scripts/dual_rnaseq_workflow.sh --step index
 ```
 
-Key STAR indexing flags applied to both genomes:
+Run alignment:
 
+```bash
+bash Analysis/Alignment/Bash_scripts/dual_rnaseq_workflow.sh --step align
 ```
+
+Run everything managed by the alignment script:
+
+```bash
+bash Analysis/Alignment/Bash_scripts/dual_rnaseq_workflow.sh --step all
+```
+
+The script discovers paired trimmed FASTQs, aligns each sample independently to
+the host and bacterial references, sorts and indexes BAMs with samtools, records
+tool/reference metadata, and reuses completed outputs unless `--force` is
+supplied.
+
+Key STAR index settings:
+
+```text
 --runMode genomeGenerate
---genomeSAindexNbases 14
 --sjdbOverhang 149
+--genomeSAindexNbases 14
 ```
 
-The bacterial genome is small enough that `--genomeSAindexNbases 14` is required to avoid STAR warnings about index size.
+Key STAR alignment settings:
 
-Index locations (from `pipeline_config.sh`):
-- Host: `Analysis/Alignment/star_index/host/`
-- Bacteria: `Analysis/Alignment/star_index/bacteria/`
+| Flag | Value |
+|---|---|
+| `--outSAMtype` | `BAM SortedByCoordinate` |
+| `--outSAMattributes` | `NH HI AS nM MD` |
+| `--outFilterType` | `BySJout` |
+| `--outFilterMultimapNmax` | `100` |
+| `--twopassMode` | `Basic` |
+| `--outSAMunmapped` | `Within` |
+| `--outReadsUnmapped` | `Fastx` |
+| `--alignIntronMax` | `1000000` for host |
+
+Primary outputs:
+
+```text
+Analysis/Alignment/star_index/host/
+Analysis/Alignment/star_index/bacteria/
+Analysis/Alignment/bam/host/
+Analysis/Alignment/bam/bacteria/
+Analysis/Alignment/logs/host/
+Analysis/Alignment/logs/bacteria/
+Analysis/Alignment/qc/host/
+Analysis/Alignment/qc/bacteria/
+```
 
 ---
 
-## Step 5 — STAR alignment
+## Step 5 - Alignment audit and MultiQC
 
-**Script:** `02_alignment/Star-mapping.sh`
-
-Aligns every sample in `Analysis/trim_results/` to the host genome first, then to the bacterial genome (STAR is run twice per sample). Skips samples already aligned (unless `--force` is passed). Runs `samtools flagstat` and `samtools idxstats` immediately after each alignment.
+File audit:
 
 ```bash
-bash 02_alignment/Star-mapping.sh --step align
-# or a single sample:
-bash 02_alignment/Star-mapping.sh --step align --sample 15m_1_Run_1_S4_L001
+bash Analysis/Alignment/Bash_scripts/pipeline_file_audit.sh
 ```
 
-Key STAR alignment flags used for both host and bacterial mapping:
+Alignment MultiQC:
 
-| Flag | Value | Purpose |
+```bash
+bash Analysis/Alignment/Bash_scripts/run_multiqc_alignment.sh
+```
+
+Outputs:
+
+```text
+Analysis/Alignment/reports/
+Analysis/Alignment/multiqc/alignment_multiqc_report.html
+```
+
+---
+
+## Step 6 - Post-alignment counting and metadata bridge
+
+Main script:
+
+```text
+Analysis/Alignment/Bash_scripts/post_alignment_analysis.sh
+```
+
+Recommended production-style run:
+
+```bash
+bash Analysis/Alignment/Bash_scripts/post_alignment_analysis.sh --threads 16 --require-complete
+```
+
+Exploratory/provisional run if some inputs are still missing:
+
+```bash
+bash Analysis/Alignment/Bash_scripts/post_alignment_analysis.sh --threads 16 --allow-incomplete
+```
+
+This stage checks BAM/index completion, runs or refreshes featureCounts for host
+and bacteria, creates sample metadata from aligned samples, and writes completion
+summaries. It is the active bridge from alignment into expression modelling.
+
+Counting outputs:
+
+```text
+Analysis/Alignment/counts/host/featureCounts_host.txt
+Analysis/Alignment/counts/bacteria/featureCounts_bacteria.txt
+```
+
+FeatureCounts settings:
+
+| Organism | Annotation mode | Important flags |
 |---|---|---|
-| `--outSAMtype` | BAM SortedByCoordinate | Coordinate-sorted BAM output |
-| `--outSAMattributes` | NH HI AS nM MD | Standard alignment tags |
-| `--outFilterType` | BySJout | Filter reads by splice junctions |
-| `--outFilterMultimapNmax` | 100 | Allow up to 100 multimappers |
-| `--twopassMode` | Basic | Two-pass alignment for better splice junction detection |
-| `--outSAMunmapped` | Within | Keep unmapped reads in the BAM |
-| `--outReadsUnmapped` | Fastx | Write unmapped reads to FASTQ |
-| `--alignIntronMax` | 1,000,000 | Maximum intron length (host) |
-| `--runThreadN` | 16 | Threads |
-
-Output BAMs go to:
-- `Analysis/Alignment/bam/host/*.host.Aligned.sortedByCoord.out.bam`
-- `Analysis/Alignment/bam/bacteria/*.bacteria.Aligned.sortedByCoord.out.bam`
+| Host | GTF, exons aggregated by `gene_id` | `-p -B -C -F GTF -t exon -g gene_id` |
+| Bacteria | GFF3, genes by `ID` | `-p -B -C -F GFF -t gene -g ID` |
 
 ---
 
-## Step 6 — File audit (optional)
+## Step 7 - DifferentialExpression validation and DESeq2
 
-**Script:** `02_alignment/pipeline_file_audit.sh`
+Current workflow root:
 
-Audits all alignment outputs and writes TSV reports to `Analysis/Alignment/reports/`:
-
-- `alignment_file_completion.tsv` — per-sample BAM/BAI presence
-- `missing_bam_indexes.tsv` — any unindexed BAMs
-- `qc_log_status.tsv` — flagstat/idxstats/STAR log presence per sample
-
-```bash
-bash 02_alignment/pipeline_file_audit.sh
+```text
+Analysis/DifferentialExpression/
 ```
 
----
-
-## Step 7 — Alignment MultiQC
-
-**Script:** `02_alignment/run_multiqc_alignment.sh`  
-**QC report:** `02_alignment/qc/alignment_multiqc_report.html`
-
-Aggregates STAR logs, samtools flagstat/idxstats, and featureCounts summaries into a single MultiQC report. Searches `alignments/`, `qc/`, `alignment_QC/`, `counts/`, and `logs/` under `Analysis/Alignment/`.
+Submit:
 
 ```bash
-bash 02_alignment/run_multiqc_alignment.sh
-# force regeneration:
-bash 02_alignment/run_multiqc_alignment.sh --force
+bash Analysis/DifferentialExpression/scripts/submit_workflow.sh
 ```
 
----
-
-## Step 8 — Merge BAMs across lanes
-
-Each sample was sequenced across two lanes (L001 and L007). These are merged before downstream counting.
-
-### Bacterial BAMs
-
-**Script:** `03_bam_processing/index_bacteria_bams.sh`
-
-Groups BAMs by sample+run key (strips the `_L00X` suffix), merges lane BAMs with `samtools merge`, and indexes with `samtools index`. Runs 4 parallel merge jobs with 2 threads each.
+Or run the master workflow directly:
 
 ```bash
-bash 03_bam_processing/index_bacteria_bams.sh
+bash Analysis/DifferentialExpression/scripts/run_full_workflow.sh
 ```
 
-Output: `Analysis/Anton_downstream_mapping/Bam_indexing/Bacteria/merged/*.bacteria.merged.bam` (96 BAMs: 48 samples × 2 runs)
+The workflow enforces the chronological timepoint order:
 
-### Host BAMs
-
-**Script:** `03_bam_processing/index_host_bams.sh`
-
-Same logic as above for host BAMs. Runs 8 parallel merge jobs.
-
-```bash
-bash 03_bam_processing/index_host_bams.sh
+```text
+0h -> 15m -> 30m -> 60m -> 3h -> 24h
 ```
 
-Output: `Analysis/Anton_downstream_mapping/Bam_indexing/Host/merged/*.host.merged.bam` (96 BAMs)
+Validation behavior:
 
----
+- blank/control baseline values are repaired to `0h` where safe
+- `1h` and `60min` are normalized to `60m`
+- malformed timepoints are logged
+- missing required timepoints stop the workflow
+- validation issues are written to `Analysis/DifferentialExpression/qc/`
 
-## Step 9 — Merged BAM QC
+Requested model:
 
-**Script:** `03_bam_processing/merged_bam_qc.sh`  
-**QC report:** `03_bam_processing/qc/merged_bam_multiqc_report.html`
-
-Runs `samtools flagstat` and `samtools idxstats` on all merged BAMs (bacteria and host in parallel), then generates a combined MultiQC report.
-
-```bash
-bash 03_bam_processing/merged_bam_qc.sh
+```r
+~ condition * timepoint
 ```
 
----
+If `condition` has only one level or the model matrix is not full rank, the
+workflow logs the issue and falls back to a valid timepoint model rather than
+silently fitting invalid coefficients.
 
-## Step 10 — Gene-level read counting
+DE scripts:
 
-### Bacterial counts
-
-**Script:** `04_feature_counting/run_featurecounts_bacteria.sh`
-
-Counts reads over *C. jejuni* genes using the GFF3 annotation. Feature type `gene`, attribute `ID` (produces `gene-Cj0001` style IDs).
-
-```bash
-bash 04_feature_counting/run_featurecounts_bacteria.sh
-```
-
-Key featureCounts flags:
-
-| Flag | Value |
+| Script | Purpose |
 |---|---|
-| `-p -B` | Paired-end, both mates must map |
-| `-C` | Do not count chimeric fragments |
-| `-F GFF -t gene -g ID` | GFF3 input, count at gene level |
-| `-T` | 16 threads |
+| `00_install_dependencies.sh` | Check/install system and R dependencies |
+| `00_install_r_packages.R` | R package installation/checks |
+| `01_validate_repair_inputs.R` | Validate counts, metadata, timepoints, BAMs, annotations |
+| `02_deseq2_all_comparisons.R` | Run DESeq2 for all host/pathogen timepoint contrasts |
+| `03_publication_figures.R` | PCA, heatmaps, volcano plots, trajectories |
+| `04_pathway_enrichment.R` | DEG/pathway-ready files and enrichment summaries |
+| `05_integrated_networks.R` | Host-pathogen integrated/correlation/network analysis |
+| `06_reports_manifests.R` | Final reports, manifests, and session summaries |
 
-Output: `Analysis/Anton_downstream_mapping/FeatureCounts/featureCounts_bacteria.txt`
+Pairwise comparisons:
 
-### Host counts
+- All 15 unordered timepoint pairs are generated in both directions
+- Outputs are generated for host and pathogen
+- Example names:
+  - `host_0h_vs_30m_DESeq2_results.tsv`
+  - `host_30m_vs_0h_DESeq2_results.tsv`
+  - `pathogen_0h_vs_30m_DESeq2_results.tsv`
 
-**Script:** `04_feature_counting/run_featurecounts_host.sh`
+Core outputs:
 
-Counts reads over human genes using the GRCh38.p14 GTF annotation. Feature type `exon`, attribute `gene_id`.
-
-```bash
-bash 04_feature_counting/run_featurecounts_host.sh
+```text
+Analysis/DifferentialExpression/results/deseq2/
+Analysis/DifferentialExpression/objects/
+Analysis/DifferentialExpression/figures/
+Analysis/DifferentialExpression/qc/
+Analysis/DifferentialExpression/reports/
+Analysis/DifferentialExpression/manifests/
 ```
-
-Key featureCounts flags:
-
-| Flag | Value |
-|---|---|
-| `-p -B` | Paired-end, both mates must map |
-| `-C` | Do not count chimeric fragments |
-| `-F GTF -t exon -g gene_id` | GTF input, count at exon level, aggregate by gene |
-| `-T` | 16 threads |
-
-Output: `Analysis/Anton_downstream_mapping/FeatureCounts/FeatureCounts_host/featureCounts_host.txt`
 
 ---
 
-## Step 11 — Count matrix filtering
+## Step 8 - Pathway enrichment and integrated analysis
 
-**Scripts:** `Analysis/filtering/filter_bacteria.R`, `Analysis/filtering/filter_host.R`  
-**Wrapper:** `Analysis/filtering/run_filtering.sh`  
-**Conda environment:** `dualrnaseq_pathway`
+Pathway and network analysis are part of the current DifferentialExpression
+workflow.
 
-Cleans the raw featureCounts output into analysis-ready count matrices: strips featureCounts metadata columns, sanitises sample names, collapses technical replicates (bacteria only), applies a low-count filter, and writes QC figures.
+Important locations:
 
-```bash
-bash Analysis/filtering/run_filtering.sh          # both organisms
-bash Analysis/filtering/run_filtering.sh bacteria # bacteria only
-bash Analysis/filtering/run_filtering.sh host     # host only
-MIN_TOTAL_COUNT=20 bash Analysis/filtering/run_filtering.sh  # custom threshold
+```text
+Analysis/DifferentialExpression/enrichment/host/
+Analysis/DifferentialExpression/enrichment/pathogen/
+Analysis/DifferentialExpression/kegg/host/
+Analysis/DifferentialExpression/kegg/pathogen/
+Analysis/DifferentialExpression/pathway_analysis/host/
+Analysis/DifferentialExpression/pathway_analysis/pathogen/
+Analysis/DifferentialExpression/integrated_analysis/
 ```
 
-### Bacteria (`filter_bacteria.R`)
+Enrichment files include:
 
-| Step | Detail |
-|---|---|
-| Column cleaning | Strips full BAM path and `.bacteria.merged.bam` suffix |
-| Run handling | Keeps all 48 columns (Run_1 and Run_2 kept separate → 8 per timepoint: 4 replicates × 2 runs) |
-| Low-count filter | Removes genes where `rowSums < 10` across all 48 samples |
-| Result | 1,603 / 1,668 genes retained (96.1%) |
-
-Timepoint mapping: `B1_H1 … B4_H4` → `0h`; `1h_*` → `60m`; all others use the prefix as-is.
-
-Output: `Analysis/filtering/bacteria/`
-- `bacteria_filtered_counts.tsv` — 1,603 genes × 48 samples
-- `bacteria_metadata.tsv` — sample_id, timepoint, run, replicate
-- `bacteria_filter_stats.tsv` — counts at each filtering step
-- `figures/bacteria_library_sizes.{pdf,png}`
-- `figures/bacteria_count_distribution.{pdf,png}`
-- `figures/bacteria_library_by_run.{pdf,png}`
-
-### Host (`filter_host.R`)
-
-| Step | Detail |
-|---|---|
-| Column cleaning | Strips full BAM path and `.host.merged.bam` suffix |
-| Run handling | Keeps all 48 columns (Run_1 and Run_2 kept separate; run is a batch covariate in DESeq2) |
-| Low-count filter | Removes genes where `rowSums < 10` across all 48 samples |
-| Result | 33,824 / 50,116 genes retained (67.5%) |
-
-Output: `Analysis/filtering/host/`
-- `host_filtered_counts.tsv` — 33,824 genes × 48 samples
-- `host_metadata.tsv` — sample_id, timepoint, run, replicate
-- `host_filter_stats.tsv` — counts at each filtering step
-- `figures/host_library_sizes.{pdf,png}`
-- `figures/host_count_distribution.{pdf,png}`
-- `figures/host_library_by_run.{pdf,png}`
+- all significant DEGs for pathway analysis
+- upregulated DEG subsets
+- downregulated DEG subsets
+- unmapped gene reports
+- per-comparison pathway status files
+- host/pathogen pathway summaries
 
 ---
 
-## Step 12 — Normalisation
+## Monitoring and diagnostics
 
-**Scripts:** `Analysis/normalisation/normalise_bacteria.R`, `Analysis/normalisation/normalise_host.R`  
-**Wrapper:** `Analysis/normalisation/run_normalisation.sh`  
-**Conda environment:** `dualrnaseq_pathway`
-
-Reads the filtered count matrices from Step 11 and produces DESeq2 size-factor-normalised counts and a variance-stabilising transformation (VST) for both organisms.
+Watch DifferentialExpression progress:
 
 ```bash
-bash Analysis/normalisation/run_normalisation.sh          # both organisms
-bash Analysis/normalisation/run_normalisation.sh bacteria # bacteria only
-bash Analysis/normalisation/run_normalisation.sh host     # host only
+tail -f Analysis/DifferentialExpression/logs/progress.log
 ```
 
-**Design:** `~ run + timepoint` for both organisms (run modelled as a batch covariate).
+Show recent progress:
 
-### Bacteria (`normalise_bacteria.R`)
+```bash
+tail -n 30 Analysis/DifferentialExpression/logs/progress.log
+```
 
-Size factors are estimated using `poscounts` (more robust than the standard median-of-ratios when many genes have zeros, which is typical for bacterial RNA-seq). VST falls back to `varianceStabilizingTransformation` if the fast approximation fails.
+Watch major workflow state changes only:
 
-| Output | Description |
-|---|---|
-| `bacteria_size_factors.tsv` | Per-sample size factors with metadata |
-| `bacteria_normalised_counts.tsv` | Raw counts ÷ size factors (1,603 genes × 48 samples) |
-| `bacteria_vst.tsv` | VST-transformed matrix for visualisation/clustering |
-| `bacteria_dds.rds` / `bacteria_vst.rds` | DESeq2 objects for downstream use |
-| `figures/bacteria_size_factors.{pdf,png}` | Size factor bar chart |
-| `figures/bacteria_normalised_boxplot.{pdf,png}` | log2 normalised counts per sample |
-| `figures/bacteria_PCA.{pdf,png}` | PCA on VST, coloured by timepoint |
-| `figures/bacteria_sample_distances.pdf` | Sample distance heatmap (VST) |
-| `figures/bacteria_top50_variable_genes.pdf` | Top 50 variable genes heatmap |
+```bash
+tail -f Analysis/DifferentialExpression/logs/progress.log | grep --line-buffered -E 'START|DONE|FAILED|INSTALL|R-INSTALL|%:'
+```
 
-Size factor range: 0.084 – 15.526 (wide range reflects the large variance in bacterial read depth across timepoints).
+Check SLURM jobs:
 
-### Host (`normalise_host.R`)
+```bash
+squeue -u lshpk18
+```
 
-Standard median-of-ratios size factor estimation.
+Check a specific job:
 
-| Output | Description |
-|---|---|
-| `host_size_factors.tsv` | Per-sample size factors with metadata |
-| `host_normalised_counts.tsv` | Raw counts ÷ size factors (33,824 genes × 48 samples) |
-| `host_vst.tsv` | VST-transformed matrix for visualisation/clustering |
-| `host_dds.rds` / `host_vst.rds` | DESeq2 objects for downstream use |
-| `figures/host_size_factors.{pdf,png}` | Size factor bar chart |
-| `figures/host_normalised_boxplot.{pdf,png}` | log2 normalised counts per sample |
-| `figures/host_PCA_by_timepoint.{pdf,png}` | PCA on VST, coloured by timepoint |
-| `figures/host_PCA_by_run.{pdf,png}` | PCA on VST, coloured by run (batch check) |
-| `figures/host_sample_distances.pdf` | Sample distance heatmap (VST) |
-| `figures/host_top50_variable_genes.pdf` | Top 50 variable genes heatmap |
-
-Size factor range: 0.772 – 1.543 (tight range, indicating consistent library sizes across host samples).
+```bash
+squeue -j JOB_ID
+sacct -j JOB_ID --format=JobID,JobName,Partition,State,ExitCode,Elapsed,MaxRSS,ReqMem,NodeList%20
+```
 
 ---
 
-## Workflow summary
+## Current workflow summary
 
-```
+```text
 Raw FASTQs
-    │
-    ├─ run_pretrim_fastqc.sh      → pre_trim_multiqc_report.html
-    │
-    ▼
-trim_fastp.sh
-    │
-    ├─ run_multiqc_trimmed.sh     → post_trim_multiqc_report.html
-    │
-    ▼
-Star-mapping.sh --step index     (build host + bacteria STAR indexes)
-    │
-    ▼
-Star-mapping.sh --step align     (STAR → sorted BAM + flagstat/idxstats per sample)
-    │
-    ├─ run_multiqc_alignment.sh   → alignment_multiqc_report.html
-    │
-    ▼
-index_bacteria_bams.sh           (merge L001+L007 → 96 bacterial merged BAMs)
-index_host_bams.sh               (merge L001+L007 → 96 host merged BAMs)
-    │
-    ├─ merged_bam_qc.sh           → merged_bam_multiqc_report.html
-    │
-    ▼
-run_featurecounts_bacteria.sh    → featureCounts_bacteria.txt
-run_featurecounts_host.sh        → featureCounts_host.txt
-    │
-    ▼
-filter_bacteria.R                (low-count filter → 1,603 genes × 48 samples)
-filter_host.R                    (low-count filter → 33,824 genes × 48 samples)
-    │
-    ▼
-normalise_bacteria.R             (poscounts size factors + VST → normalised counts)
-normalise_host.R                 (median-of-ratios size factors + VST → normalised counts)
+    |
+    v
+FastQC + MultiQC
+    |
+    v
+fastp trimming
+    |
+    v
+Post-trim MultiQC
+    |
+    v
+dual_rnaseq_workflow.sh --step index
+    |
+    v
+dual_rnaseq_workflow.sh --step align
+    |
+    v
+pipeline_file_audit.sh + run_multiqc_alignment.sh
+    |
+    v
+post_alignment_analysis.sh
+    |-- host featureCounts
+    |-- bacterial featureCounts
+    |-- metadata and completion summaries
+    |
+    v
+DifferentialExpression/scripts/submit_workflow.sh
+    |-- dependency checks
+    |-- input validation and repair
+    |-- DESeq2 all timepoint comparisons
+    |-- publication figures
+    |-- pathway enrichment
+    |-- integrated host-pathogen networks
+    |-- reports and manifests
 ```
+
+---
+
+## Legacy standalone filtering and normalisation
+
+The older standalone filtering and normalisation scripts are still present:
+
+```text
+Analysis/filtering/filter_bacteria.R
+Analysis/filtering/filter_host.R
+Analysis/filtering/run_filtering.sh
+Analysis/normalisation/normalise_bacteria.R
+Analysis/normalisation/normalise_host.R
+Analysis/normalisation/run_normalisation.sh
+```
+
+They previously produced filtered matrices, DESeq2 size-factor-normalised counts,
+and VST matrices under `Analysis/filtering/` and `Analysis/normalisation/`.
+
+The current production path is the generated `Analysis/DifferentialExpression/`
+workflow, which validates inputs from `Analysis/Alignment/counts/`, repairs
+metadata/timepoints where safe, runs all DESeq2 comparisons, and continues into
+figures, enrichment, integrated analysis, and final reports.
+
+---
+
+## Main documentation files
+
+| File | Purpose |
+|---|---|
+| `Analysis/README_complete_dual_rnaseq_pipeline.md` | Master project workflow README |
+| `Analysis/Alignment/README_alignment_scripts.md` | Alignment/counting/QC script guide |
+| `Analysis/DifferentialExpression/README.md` | DifferentialExpression overview |
+| `Analysis/DifferentialExpression/scripts/README.md` | Generated DE script responsibilities |
+| `Analysis/DifferentialExpression/slurm/README.md` | SLURM job files and submission |
+| `Analysis/trim_results/README_trim_scripts.md` | fastp trimming notes |
+| `Analysis/fastqc_results/README_fastqc_scripts.md` | FastQC/MultiQC notes |
