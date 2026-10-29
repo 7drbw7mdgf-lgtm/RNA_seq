@@ -1,0 +1,474 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WORKDIR="${WORKDIR:-/home/lshpk18/OzanGundogdu_SOUK011275}"
+ALIGNMENT_DIR="${ALIGNMENT_DIR:-$WORKDIR/Analysis/Alignment}"
+BAM_DIR="${BAM_DIR:-$ALIGNMENT_DIR/bam}"
+OUT_DIR="${OUT_DIR:-$ALIGNMENT_DIR/alignment_QC}"
+REF_DIR="${REF_DIR:-$ALIGNMENT_DIR/references}"
+HOST_ANNOTATION="${HOST_ANNOTATION:-$REF_DIR/GCF_000001405.40_GRCh38.p14_genomic.gtf}"
+BACTERIA_ANNOTATION="${BACTERIA_ANNOTATION:-$REF_DIR/AL111168.1.gff3}"
+THREADS="${THREADS:-16}"
+TARGET="${TARGET:-all}"
+CONDA_ENV="${CONDA_ENV:-dualrnaseq}"
+SKIP_CONDA="${SKIP_CONDA:-false}"
+INSTALL_QC_TOOLS="${INSTALL_QC_TOOLS:-false}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  bash Analysis/Alignment/Aligment_QC [options]
+
+Options:
+  --target host|bacteria|all   Which BAM set to QC (default: all)
+  --bam-dir PATH               BAM root with host/ and bacteria/ subfolders
+  --out-dir PATH               Output directory (default: Analysis/Alignment/alignment_QC)
+  --threads N                  Threads for samtools and Qualimap (default: 16)
+  --install-qc-tools           Install qualimap and RSeQC into CONDA_ENV before running QC
+  --skip-conda                 Do not activate the default conda environment
+  -h, --help                   Show this help
+
+Environment overrides:
+  WORKDIR, ALIGNMENT_DIR, BAM_DIR, OUT_DIR, HOST_ANNOTATION, BACTERIA_ANNOTATION,
+  THREADS, TARGET, CONDA_ENV, SKIP_CONDA, INSTALL_QC_TOOLS
+
+Install the optional extended-QC tools manually before running:
+  conda install -n dualrnaseq -c bioconda -c conda-forge qualimap rseqc -y
+USAGE
+}
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "WARNING: $*" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)
+      TARGET="${2:-}"
+      shift 2
+      ;;
+    --bam-dir)
+      BAM_DIR="${2:-}"
+      shift 2
+      ;;
+    --out-dir)
+      OUT_DIR="${2:-}"
+      shift 2
+      ;;
+    --threads)
+      THREADS="${2:-}"
+      shift 2
+      ;;
+    --install-qc-tools)
+      INSTALL_QC_TOOLS="true"
+      shift
+      ;;
+    --skip-conda)
+      SKIP_CONDA="true"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "Unknown argument: $1"
+      ;;
+  esac
+done
+
+case "$TARGET" in
+  host|bacteria|all) ;;
+  *) die "--target must be one of: host, bacteria, all" ;;
+esac
+
+if [[ "$SKIP_CONDA" != "true" && -n "$CONDA_ENV" ]]; then
+  if [[ -f /home/lshpk18/miniconda3/bin/activate ]]; then
+    echo "Activating conda environment: $CONDA_ENV"
+    source /home/lshpk18/miniconda3/bin/activate "$CONDA_ENV"
+  else
+    warn "Conda activate script not found; assuming QC tools are already in PATH"
+  fi
+fi
+
+install_qc_tools() {
+  if [[ "$SKIP_CONDA" == "true" || -z "$CONDA_ENV" ]]; then
+    die "--install-qc-tools requires conda activation; remove --skip-conda and set CONDA_ENV"
+  fi
+
+  local installer=""
+  if command -v mamba >/dev/null 2>&1; then
+    installer="$(command -v mamba)"
+  elif command -v conda >/dev/null 2>&1; then
+    installer="$(command -v conda)"
+  elif [[ -x /home/lshpk18/miniconda3/bin/conda ]]; then
+    installer="/home/lshpk18/miniconda3/bin/conda"
+  else
+    die "No conda or mamba executable found; cannot install qualimap/rseqc"
+  fi
+
+  echo "Installing extended QC tools into conda environment '$CONDA_ENV': qualimap rseqc"
+  "$installer" install -n "$CONDA_ENV" -c bioconda -c conda-forge qualimap rseqc -y
+}
+
+if [[ "${INSTALL_QC_TOOLS,,}" == "true" ]]; then
+  install_qc_tools
+fi
+
+required_tools=(samtools awk sed sort)
+for tool in "${required_tools[@]}"; do
+  command -v "$tool" >/dev/null 2>&1 || die "Required tool '$tool' is not in PATH"
+done
+
+QUALIMAP_AVAILABLE=false
+INFER_EXPERIMENT_AVAILABLE=false
+INNER_DISTANCE_AVAILABLE=false
+READ_DISTRIBUTION_AVAILABLE=false
+
+if command -v qualimap >/dev/null 2>&1; then
+  QUALIMAP_AVAILABLE=true
+else
+  warn "Optional tool 'qualimap' is not in PATH; Qualimap bamqc outputs will be marked NA"
+fi
+if command -v infer_experiment.py >/dev/null 2>&1; then
+  INFER_EXPERIMENT_AVAILABLE=true
+else
+  warn "Optional tool 'infer_experiment.py' is not in PATH; strandedness outputs will be marked NA"
+fi
+if command -v inner_distance.py >/dev/null 2>&1; then
+  INNER_DISTANCE_AVAILABLE=true
+else
+  warn "Optional tool 'inner_distance.py' is not in PATH; insert-size outputs will be marked NA"
+fi
+if command -v read_distribution.py >/dev/null 2>&1; then
+  READ_DISTRIBUTION_AVAILABLE=true
+else
+  warn "Optional tool 'read_distribution.py' is not in PATH; read-distribution outputs will be marked NA"
+fi
+
+mkdir -p "$OUT_DIR"/{references,summary,logs}
+SUMMARY="$OUT_DIR/summary/alignment_qc_summary.tsv"
+printf 'target\tsample\tbam\ttotal_reads\tmapped_reads\tmapping_percent\tduplicate_reads\tduplicate_percent\trRNA_reads\trRNA_percent\tflagstat\tqualimap_dir\tinsert_size_file\tstrandedness_file\tread_distribution_file\n' > "$SUMMARY"
+
+make_gene_bed_from_gtf() {
+  local gtf="$1"
+  local bed="$2"
+  [[ -f "$gtf" ]] || die "Host annotation not found: $gtf"
+  awk -F '\t' 'BEGIN {OFS="\t"}
+    $0 !~ /^#/ && $3 == "exon" {
+      tx_id = ""
+      n = split($9, attrs, ";")
+      for (i = 1; i <= n; i++) {
+        field = attrs[i]
+        sub(/^[[:space:]]+/, "", field)
+        if (field ~ /^transcript_id /) {
+          tx_id = field
+          sub(/^transcript_id "/, "", tx_id)
+          sub(/"$/, "", tx_id)
+        } else if (field ~ /^gene_id / && tx_id == "") {
+          tx_id = field
+          sub(/^gene_id "/, "", tx_id)
+          sub(/"$/, "", tx_id)
+        }
+      }
+      if (tx_id == "") tx_id = $1 ":" $4 "-" $5
+      start = $4 - 1
+      if (start < 0) start = 0
+      key = $1 SUBSEP tx_id SUBSEP $7
+      if (!(key in chrom)) {
+        chrom[key] = $1
+        name[key] = tx_id
+        strand[key] = $7
+        tx_start[key] = start
+        tx_end[key] = $5
+      }
+      if (start < tx_start[key]) tx_start[key] = start
+      if ($5 > tx_end[key]) tx_end[key] = $5
+      count[key]++
+      exon_start[key, count[key]] = start
+      exon_size[key, count[key]] = $5 - start
+    }
+    END {
+      for (key in chrom) {
+        block_sizes = ""
+        block_starts = ""
+        for (i = 1; i <= count[key]; i++) {
+          block_sizes = block_sizes exon_size[key, i] ","
+          block_starts = block_starts (exon_start[key, i] - tx_start[key]) ","
+        }
+        print chrom[key], tx_start[key], tx_end[key], name[key], 0, strand[key], tx_start[key], tx_end[key], 0, count[key], block_sizes, block_starts
+      }
+    }' "$gtf" | sort -k1,1 -k2,2n > "$bed"
+}
+
+make_gene_bed_from_gff3() {
+  local gff="$1"
+  local bed="$2"
+  [[ -f "$gff" ]] || die "Bacterial annotation not found: $gff"
+  awk -F '\t' 'BEGIN {OFS="\t"}
+    $0 !~ /^#/ && ($3 == "gene" || $3 == "CDS" || $3 == "exon" || $3 == "rRNA" || $3 == "tRNA") {
+      name = "feature"
+      n = split($9, attrs, ";")
+      for (i = 1; i <= n; i++) {
+        split(attrs[i], kv, "=")
+        if (kv[1] == "ID" || kv[1] == "Name" || kv[1] == "gene") {
+          name = kv[2]
+          break
+        }
+      }
+      start = $4 - 1
+      if (start < 0) start = 0
+      size = $5 - start
+      print $1, start, $5, name, 0, $7, start, $5, 0, 1, size ",", "0,"
+    }' "$gff" | sort -k1,1 -k2,2n > "$bed"
+}
+
+make_rrna_bed_from_gtf() {
+  local gtf="$1"
+  local bed="$2"
+  [[ -f "$gtf" ]] || die "Host annotation not found: $gtf"
+  awk -F '\t' 'BEGIN {OFS="\t"; IGNORECASE=1}
+    $0 !~ /^#/ && ($3 ~ /rRNA/ || $9 ~ /gene_biotype "rRNA"/ || $9 ~ /transcript_biotype "rRNA"/ || $9 ~ /gbkey "rRNA"/ || $9 ~ /product "[^"]*ribosomal RNA/) {
+      name = "rRNA"
+      n = split($9, attrs, ";")
+      for (i = 1; i <= n; i++) {
+        field = attrs[i]
+        sub(/^[[:space:]]+/, "", field)
+        if (field ~ /^gene /) {
+          name = field
+          sub(/^gene "/, "", name)
+          sub(/"$/, "", name)
+          break
+        } else if (field ~ /^gene_id /) {
+          name = field
+          sub(/^gene_id "/, "", name)
+          sub(/"$/, "", name)
+        }
+      }
+      start = $4 - 1
+      if (start < 0) start = 0
+      print $1, start, $5, name, 0, $7
+    }' "$gtf" | sort -k1,1 -k2,2n > "$bed"
+}
+
+make_rrna_bed_from_gff3() {
+  local gff="$1"
+  local bed="$2"
+  [[ -f "$gff" ]] || die "Bacterial annotation not found: $gff"
+  awk -F '\t' 'BEGIN {OFS="\t"; IGNORECASE=1}
+    $0 !~ /^#/ && ($3 ~ /rRNA/ || $9 ~ /ribosomal RNA/ || $9 ~ /Name=.*rRNA/) {
+      name = "rRNA"
+      n = split($9, attrs, ";")
+      for (i = 1; i <= n; i++) {
+        split(attrs[i], kv, "=")
+        if (kv[1] == "ID" || kv[1] == "Name" || kv[1] == "gene") {
+          name = kv[2]
+          break
+        }
+      }
+      start = $4 - 1
+      if (start < 0) start = 0
+      print $1, start, $5, name, 0, $7
+    }' "$gff" | sort -k1,1 -k2,2n > "$bed"
+}
+
+parse_flagstat() {
+  local flagstat="$1"
+  local metric="$2"
+  case "$metric" in
+    total)
+      awk '/ in total / {print $1; exit}' "$flagstat"
+      ;;
+    mapped)
+      awk '/ mapped \(/ && $0 !~ /primary mapped/ {print $1; exit}' "$flagstat"
+      ;;
+    mapped_percent)
+      awk '/ mapped \(/ && $0 !~ /primary mapped/ {
+        line = $0
+        sub(/^.*\(/, "", line)
+        sub(/%.*$/, "", line)
+        if (line ~ /^[0-9.]+$/) print line; else print "NA"
+        exit
+      }' "$flagstat"
+      ;;
+    duplicate)
+      awk '/ duplicates$/ {print $1; exit}' "$flagstat"
+      ;;
+  esac
+}
+
+percent() {
+  local numerator="$1"
+  local denominator="$2"
+  awk -v n="$numerator" -v d="$denominator" 'BEGIN { if (d > 0) printf "%.4f", (n / d) * 100; else print "NA" }'
+}
+
+prepare_reference_beds() {
+  local host_gene="$OUT_DIR/references/host.annotation.bed"
+  local host_rrna="$OUT_DIR/references/host.rRNA.bed"
+  local bact_gene="$OUT_DIR/references/bacteria.annotation.bed"
+  local bact_rrna="$OUT_DIR/references/bacteria.rRNA.bed"
+
+  [[ -s "$host_gene" ]] || make_gene_bed_from_gtf "$HOST_ANNOTATION" "$host_gene"
+  [[ -s "$host_rrna" ]] || make_rrna_bed_from_gtf "$HOST_ANNOTATION" "$host_rrna"
+  [[ -s "$bact_gene" ]] || make_gene_bed_from_gff3 "$BACTERIA_ANNOTATION" "$bact_gene"
+  [[ -s "$bact_rrna" ]] || make_rrna_bed_from_gff3 "$BACTERIA_ANNOTATION" "$bact_rrna"
+
+  if [[ ! -s "$host_rrna" ]]; then
+    warn "No host rRNA intervals were detected in $HOST_ANNOTATION"
+  fi
+  if [[ ! -s "$bact_rrna" ]]; then
+    warn "No bacterial rRNA intervals were detected in $BACTERIA_ANNOTATION"
+  fi
+}
+
+validate_target_inputs() {
+  local target="$1"
+  local bam_subdir="$BAM_DIR/$target"
+
+  [[ -d "$bam_subdir" ]] || die "BAM directory not found: $bam_subdir"
+  shopt -s nullglob
+  local bams=("$bam_subdir"/*.bam)
+  shopt -u nullglob
+  [[ ${#bams[@]} -gt 0 ]] || die "No BAM files found in $bam_subdir"
+}
+
+run_bam_qc() {
+  local target="$1"
+  local bam="$2"
+  local gene_bed="$3"
+  local rrna_bed="$4"
+  local sample
+  sample="$(basename "$bam" .Aligned.sortedByCoord.out.bam)"
+
+  local target_dir="$OUT_DIR/$target"
+  local sample_dir="$target_dir/$sample"
+  local flagstat_dir="$sample_dir/samtools_flagstat"
+  local qualimap_dir="$sample_dir/qualimap_bamqc"
+  local rseqc_dir="$sample_dir/rseqc"
+  local rrna_dir="$sample_dir/rRNA_contamination"
+  mkdir -p "$flagstat_dir" "$rseqc_dir" "$rrna_dir"
+  if [[ "$QUALIMAP_AVAILABLE" == "true" ]]; then
+    mkdir -p "$qualimap_dir"
+  fi
+
+  echo "QC: $target $sample"
+
+  if [[ ! -s "${bam}.bai" ]]; then
+    samtools index -@ "$THREADS" "$bam"
+  fi
+
+  local flagstat_file="$flagstat_dir/${sample}.flagstat.txt"
+  samtools flagstat -@ "$THREADS" "$bam" > "$flagstat_file"
+
+  if [[ "$QUALIMAP_AVAILABLE" == "true" ]]; then
+    qualimap bamqc \
+      -bam "$bam" \
+      -outdir "$qualimap_dir" \
+      -outformat HTML \
+      -nt "$THREADS" \
+      --java-mem-size=8G \
+      > "$sample_dir/qualimap_bamqc.log" 2>&1 || warn "Qualimap failed for $bam; see $sample_dir/qualimap_bamqc.log"
+  else
+    qualimap_dir="NA"
+  fi
+
+  local strandedness_file="$rseqc_dir/${sample}.infer_experiment.txt"
+  local insert_file="$rseqc_dir/${sample}.inner_distance.txt"
+  local read_distribution_file="$rseqc_dir/${sample}.read_distribution.txt"
+  if [[ "$INFER_EXPERIMENT_AVAILABLE" == "true" ]]; then
+    infer_experiment.py -r "$gene_bed" -i "$bam" > "$strandedness_file" 2> "$rseqc_dir/${sample}.infer_experiment.stderr.log" || warn "RSeQC infer_experiment failed for $bam"
+  else
+    strandedness_file="NA"
+  fi
+  if [[ "$INNER_DISTANCE_AVAILABLE" == "true" ]]; then
+    inner_distance.py -r "$gene_bed" -i "$bam" -o "$rseqc_dir/${sample}.inner_distance" > "$insert_file" 2> "$rseqc_dir/${sample}.inner_distance.stderr.log" || warn "RSeQC inner_distance failed for $bam"
+  else
+    insert_file="NA"
+  fi
+  if [[ "$READ_DISTRIBUTION_AVAILABLE" == "true" ]]; then
+    read_distribution.py -r "$gene_bed" -i "$bam" > "$read_distribution_file" 2> "$rseqc_dir/${sample}.read_distribution.stderr.log" || warn "RSeQC read_distribution failed for $bam"
+  else
+    read_distribution_file="NA"
+  fi
+
+  local total_reads mapped_reads mapping_percent duplicate_reads duplicate_percent rrna_reads rrna_percent
+  total_reads="$(parse_flagstat "$flagstat_file" total)"
+  mapped_reads="$(parse_flagstat "$flagstat_file" mapped)"
+  mapping_percent="$(parse_flagstat "$flagstat_file" mapped_percent)"
+  duplicate_reads="$(parse_flagstat "$flagstat_file" duplicate)"
+  duplicate_percent="$(percent "${duplicate_reads:-0}" "${total_reads:-0}")"
+
+  if [[ -s "$rrna_bed" ]]; then
+    rrna_reads="$(samtools view -@ "$THREADS" -c -F 4 -L "$rrna_bed" "$bam")"
+  else
+    rrna_reads="NA"
+  fi
+  if [[ "$rrna_reads" == "NA" ]]; then
+    rrna_percent="NA"
+  else
+    rrna_percent="$(percent "$rrna_reads" "${mapped_reads:-0}")"
+  fi
+  {
+    echo "sample	target	bam	mapped_reads	rRNA_reads	rRNA_percent_of_mapped"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$sample" "$target" "$bam" "${mapped_reads:-NA}" "$rrna_reads" "$rrna_percent"
+  } > "$rrna_dir/${sample}.rRNA_contamination.tsv"
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$target" "$sample" "$bam" "${total_reads:-NA}" "${mapped_reads:-NA}" "${mapping_percent:-NA}" \
+    "${duplicate_reads:-NA}" "$duplicate_percent" "$rrna_reads" "$rrna_percent" \
+    "$flagstat_file" "$qualimap_dir" "$insert_file" "$strandedness_file" "$read_distribution_file" >> "$SUMMARY"
+}
+
+run_target() {
+  local target="$1"
+  local bam_subdir="$BAM_DIR/$target"
+  local gene_bed="$OUT_DIR/references/$target.annotation.bed"
+  local rrna_bed="$OUT_DIR/references/$target.rRNA.bed"
+
+  [[ -d "$bam_subdir" ]] || die "BAM directory not found: $bam_subdir"
+  shopt -s nullglob
+  local bams=("$bam_subdir"/*.bam)
+  [[ ${#bams[@]} -gt 0 ]] || die "No BAM files found in $bam_subdir"
+
+  for bam in "${bams[@]}"; do
+    run_bam_qc "$target" "$bam" "$gene_bed" "$rrna_bed"
+  done
+}
+
+case "$TARGET" in
+  host)
+    validate_target_inputs host
+    ;;
+  bacteria)
+    validate_target_inputs bacteria
+    ;;
+  all)
+    validate_target_inputs host
+    validate_target_inputs bacteria
+    ;;
+esac
+
+prepare_reference_beds
+
+case "$TARGET" in
+  host)
+    run_target host
+    ;;
+  bacteria)
+    run_target bacteria
+    ;;
+  all)
+    run_target host
+    run_target bacteria
+    ;;
+esac
+
+echo "QC complete."
+echo "Results: $OUT_DIR"
+echo "Summary: $SUMMARY"
